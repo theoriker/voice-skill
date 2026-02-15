@@ -1,0 +1,27 @@
+# Voice Module Configuration
+
+alexa:
+  wake_word: "Alexa"
+  device_name: "Echo Dot"
+
+audio:
+  tts_rate: 160           # Words per minute (slower = clearer for Alexa)
+  tts_volume: 0.9
+  mic_mute_delay: 0.8     # Seconds to wait after speaking before listening
+  listen_timeout: 10      # Max seconds to wait for response
+  silence_threshold: 1.5  # Seconds of silence = end of response
+
+stt:
+  engine: "mlx"           # mlx or openai
+  model: "mlx-community/whisper-small-mlx"
+  vad_aggressiveness: 2   # 0-3 (higher = stricter)
+
+shopping:
+  max_price: 50.00
+  require_approval_above: 50.00
+  auto_confirm_below: 15.00
+  log_file: "logs/purchases.jsonl"
+
+conversation:
+  max_retries: 3
+  retry_delay: 2.0

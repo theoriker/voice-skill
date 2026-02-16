@@ -6,6 +6,7 @@ set -e
 VOICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 PORT=8765
 LOG_DIR="/tmp"
+umask 077  # Restrict new file permissions
 CF_LOG="$LOG_DIR/cloudflared-voice.log"
 UV_LOG="$LOG_DIR/twilio-voice.log"
 PID_FILE="$LOG_DIR/voice-server.pids"
@@ -54,7 +55,7 @@ python3 -c "import socket; s=socket.socket(); s.bind(('0.0.0.0',$PORT)); s.close
 # Start uvicorn
 echo "Starting voice server on port $PORT..."
 cd "$VOICE_DIR"
-nohup python3 -m uvicorn scripts.adapters.twilio_voice:app --host 0.0.0.0 --port $PORT > "$UV_LOG" 2>&1 &
+nohup python3 -m uvicorn scripts.adapters.twilio_voice:app --host 127.0.0.1 --port $PORT > "$UV_LOG" 2>&1 &
 UV_PID=$!
 echo "$UV_PID" > "$PID_FILE"
 sleep 2
@@ -91,14 +92,13 @@ fi
 TUNNEL_HOST=$(echo "$TUNNEL_URL" | sed 's|https://||')
 echo -e "${GREEN}Tunnel: $TUNNEL_URL${NC}"
 
-# Update PUBLIC_HOST in the server code
-sed -i '' "s|PUBLIC_HOST = os.environ.get('PUBLIC_HOST', '[^']*')|PUBLIC_HOST = os.environ.get('PUBLIC_HOST', '$TUNNEL_HOST')|" \
-    "$VOICE_DIR/scripts/adapters/twilio_voice.py"
+# Export PUBLIC_HOST for the server to pick up
+export PUBLIC_HOST="$TUNNEL_HOST"
 
-# Restart uvicorn with new URL
+# Restart uvicorn with env var (binds to localhost only)
 kill "$UV_PID" 2>/dev/null
 sleep 2
-nohup python3 -m uvicorn scripts.adapters.twilio_voice:app --host 0.0.0.0 --port $PORT > "$UV_LOG" 2>&1 &
+PUBLIC_HOST="$TUNNEL_HOST" nohup python3 -m uvicorn scripts.adapters.twilio_voice:app --host 127.0.0.1 --port $PORT > "$UV_LOG" 2>&1 &
 UV_PID=$!
 # Update PID file
 echo "$UV_PID" > "$PID_FILE"
@@ -143,7 +143,7 @@ while true; do
     if ! kill -0 "$UV_PID" 2>/dev/null; then
         echo -e "${RED}Server died — restarting...${NC}"
         cd "$VOICE_DIR"
-        nohup python3 -m uvicorn scripts.adapters.twilio_voice:app --host 0.0.0.0 --port $PORT > "$UV_LOG" 2>&1 &
+        PUBLIC_HOST="$TUNNEL_HOST" nohup python3 -m uvicorn scripts.adapters.twilio_voice:app --host 127.0.0.1 --port $PORT > "$UV_LOG" 2>&1 &
         UV_PID=$!
         echo "$UV_PID" > "$PID_FILE"
         echo "$CF_PID" >> "$PID_FILE"

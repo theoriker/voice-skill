@@ -29,6 +29,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from twilio.twiml.voice_response import VoiceResponse, Gather
+from twilio.request_validator import RequestValidator
 from twilio.rest import Client as TwilioClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -48,7 +49,21 @@ TWILIO_AUTH_TOKEN = os.environ.get('TWILIO_AUTH_TOKEN', '')
 TWILIO_PHONE = os.environ.get('TWILIO_PHONE', '+15714448518')
 GATEWAY_URL = os.environ.get('OPENCLAW_GATEWAY_URL', 'ws://localhost:18789')
 AGENT_SESSION = os.environ.get('OPENCLAW_SESSION', 'agent:main:voice')
-PUBLIC_HOST = os.environ.get('PUBLIC_HOST', 'workers-slides-manufacturer-bigger.trycloudflare.com')
+def get_public_host():
+    return os.environ.get('PUBLIC_HOST', 'localhost:8765')
+
+# Keep module-level for backward compat, but prefer get_public_host() or env var
+PUBLIC_HOST = os.environ.get('PUBLIC_HOST', 'localhost:8765')
+
+# ── Request Validation ──────────────────────────────────────
+
+def validate_twilio_request(request_url, form_data, signature):
+    """Validate that a request actually came from Twilio."""
+    if not TWILIO_AUTH_TOKEN:
+        return True  # Skip validation if no auth token configured
+    validator = RequestValidator(TWILIO_AUTH_TOKEN)
+    return validator.validate(request_url, form_data, signature)
+
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'assets')
 
@@ -358,6 +373,14 @@ async def handle_call(request: Request):
         form = {}
     
     caller = form.get("From", "") if hasattr(form, 'get') else ""
+    
+    # Validate Twilio signature
+    signature = request.headers.get("X-Twilio-Signature", "")
+    request_url = f"https://{PUBLIC_HOST}/voice"
+    if not validate_twilio_request(request_url, dict(form) if hasattr(form, 'items') else {}, signature):
+        logger.warning(f"Invalid Twilio signature from {caller} — rejecting")
+        return PlainTextResponse("Forbidden", status_code=403)
+    
     caller_info = KNOWN_CALLERS.get(caller)
     
     response = VoiceResponse()
@@ -750,7 +773,7 @@ if __name__ == '__main__':
     import uvicorn
 
     parser = argparse.ArgumentParser(description='Twilio Voice Adapter')
-    parser.add_argument('--host', default='0.0.0.0')
+    parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8765)
     parser.add_argument('--call', help='Phone number to call')
     args = parser.parse_args()

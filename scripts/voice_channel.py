@@ -189,7 +189,7 @@ class VoiceChannel:
                         if isinstance(b, dict) and b.get("type") == "text"
                     )
             text = text.strip()
-            if text and text not in ("NO_REPLY", "HEARTBEAT_OK"):
+            if text and not any(text.startswith(skip) for skip in ("NO_REPLY", "HEARTBEAT_OK", "NO_")):
                 logger.info(f"🤖 {text[:150]}")
                 self.tts_queue.put(text)
 
@@ -220,16 +220,24 @@ class VoiceChannel:
             except Exception as e:
                 logger.error(f"TTS: {e}")
             finally:
+                import time as _t; _t.sleep(1.0)  # post-TTS delay to prevent echo
                 self.speaking = False
 
     def _speak(self, text):
-        """Speak via macOS `say` command — thread-safe."""
+        """Speak via macOS `say` → speaker device, then restore default."""
+        restore_to = None
         if self.speaker_device:
+            restore_to = subprocess.run(
+                ['SwitchAudioSource', '-c'], capture_output=True, text=True
+            ).stdout.strip()
             subprocess.run(['SwitchAudioSource', '-s', self.speaker_device],
                            capture_output=True)
-        # Use `say` directly (no temp file needed, thread-safe)
         subprocess.run(['say', '-v', self.tts_voice, '-r', str(self.tts_rate), text],
                        check=True)
+        if restore_to and restore_to != self.speaker_device:
+            import time as _t; _t.sleep(0.3)
+            subprocess.run(['SwitchAudioSource', '-s', restore_to],
+                           capture_output=True)
 
     # ── STT (continuous listen) ────────────────────────────
 

@@ -68,10 +68,18 @@ KNOWN_CALLERS = {
     "+14132752009": {"name": "Jessi", "access": "full"},
     "+18023639617": {"name": "Dan", "access": "limited"},
     "+12074792774": {"name": "Mom", "access": "limited"},
+    "+15714448518": {"name": "Outbound", "access": "full"},  # Our own Twilio number (outbound calls)
+    "+16468531206": {"name": "Dad", "access": "limited"},
 }
 
-LIMITED_CONTEXT = """Do NOT share specific schedules, locations, travel plans, 
-or personal details about other family members. Keep responses helpful but general."""
+LIMITED_CONTEXT = """STRICT PRIVACY RULES FOR THIS CALLER:
+- Do NOT share anyone's schedule, location, travel plans, or whereabouts
+- Do NOT share project details, work tasks, or what you've been working on
+- Do NOT share other family members' personal information
+- Do NOT discuss contents of emails, calendar events, or memory files
+- Keep conversation light and general - you can chat, tell jokes, discuss weather, sports, etc.
+- If asked about family members, say something like 'You would have to ask them directly'
+- You are a friendly AI assistant, just with privacy boundaries"""
 
 
 VOICE_CONTEXT = """[VOICE CALL] You are on a live phone call. Rules:
@@ -358,14 +366,26 @@ async def handle_call(request: Request):
         # Unknown caller — voicemail
         logger.info(f"📞 Unknown caller: {caller} — sending to voicemail")
         response.say("You have reached Theo. I am not available to take calls from this number. "
-                     "If you need to reach Mark or Jessi, please contact them directly. Goodbye.", 
+                     "If you need to reach Mark or Jessi, please contact them directly. "
+                     "To leave a message, speak after the tone.", 
                      voice="alice")
+        response.record(
+            max_length=120,
+            action=f"https://{PUBLIC_HOST}/voice/voicemail-done",
+            transcribe=True,
+            play_beep=True,
+        )
+        response.say("No message received. Goodbye.", voice="alice")
         response.hangup()
         return PlainTextResponse(str(response), media_type="text/xml")
     
     if caller_info:
-        logger.info(f"📞 Incoming call from {caller_info['name']} ({caller})")
-        response.say(f"Hey {caller_info['name']}, this is Theo. Go ahead.", voice="alice")
+        if caller_info['name'] == "Outbound":
+            logger.info(f"📞 Outbound call connected")
+            response.say("Connected to Theo. Go ahead.", voice="alice")
+        else:
+            logger.info(f"📞 Incoming call from {caller_info['name']} ({caller})")
+            response.say(f"Hey {caller_info['name']}, this is Theo. Go ahead.", voice="alice")
     else:
         # No caller ID (outbound calls come through /voice/outbound)
         response.say("Connected to Theo. Go ahead.", voice="alice")
@@ -666,6 +686,27 @@ async def deliver_prank_response(request: Request):
     logger.info(f"🎭 Delivered prank response to {call_sid}")
     return PlainTextResponse(str(response), media_type="text/xml")
 
+
+
+
+@app.post("/voice/voicemail-done")
+async def handle_voicemail(request: Request):
+    """Handle completed voicemail recording."""
+    try:
+        form = await request.form()
+    except Exception:
+        form = {}
+
+    caller = form.get("From", "") if hasattr(form, 'get') else ""
+    recording_url = form.get("RecordingUrl", "") if hasattr(form, 'get') else ""
+    duration = form.get("RecordingDuration", "0") if hasattr(form, 'get') else "0"
+
+    logger.info(f"Voicemail from {caller}: {recording_url} ({duration}s)")
+
+    response = VoiceResponse()
+    response.say("Thank you. Your message has been received. Goodbye.", voice="alice")
+    response.hangup()
+    return PlainTextResponse(str(response), media_type="text/xml")
 
 
 @app.post("/voice/outbound")

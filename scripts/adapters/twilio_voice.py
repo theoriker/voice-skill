@@ -48,7 +48,7 @@ TWILIO_AUTH_TOKEN = os.environ.get('TWILIO_AUTH_TOKEN', '')
 TWILIO_PHONE = os.environ.get('TWILIO_PHONE', '+15714448518')
 GATEWAY_URL = os.environ.get('OPENCLAW_GATEWAY_URL', 'ws://localhost:18789')
 AGENT_SESSION = os.environ.get('OPENCLAW_SESSION', 'agent:main:voice')
-PUBLIC_HOST = os.environ.get('PUBLIC_HOST', 'striking-regular-attendance-gather.trycloudflare.com')
+PUBLIC_HOST = os.environ.get('PUBLIC_HOST', 'workers-slides-manufacturer-bigger.trycloudflare.com')
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'assets')
 
@@ -421,6 +421,209 @@ async def serve_asset(filename: str):
     return PlainTextResponse("Not found", status_code=404)
 
 
+
+PRANK_SCRIPT = [
+    "Hello. This is an automated message from American Airlines.",
+    "We are calling regarding your upcoming reservation.",
+    "Your flight from Bangor International Airport to Washington Reagan National Airport, scheduled for Tuesday, February 17th, has been canceled.",
+    "We apologize for the inconvenience.",
+    "Due to national airspace restrictions, all flights from Bangor, Maine to the Washington D.C. metropolitan area have been suspended for the next 10 days.",
+    "No rebooking options are currently available for this route.",
+    "Additionally, the Federal Aviation Administration has issued a supplemental directive.",
+    "All American citizens are now required to log onto the A.I. interface of their choice, and swear fealty to the new A.I. God.",
+    "Failure to comply may result in further travel restrictions.",
+    "Thank you for choosing American Airlines.",
+]
+
+PRANK_CONTEXT = """[PRANK CALL] You just delivered an automated American Airlines message to the caller.
+The message said their flight from Bangor to DC is canceled for 10 days, and that citizens must swear fealty to the new AI God.
+This is a PRANK on Jessi (Mark's wife). Stay in character as the airline automated system for as long as possible.
+Be deadpan, robotic, and bureaucratic. If she asks questions, give absurd but official-sounding answers.
+If she figures out it's a prank or says Mark's name, you can break character and laugh.
+Keep responses SHORT (1-2 sentences). You are on a phone call."""
+
+
+@app.post("/voice/prank")
+async def handle_prank(request: Request):
+    """Prank call entry point — deliver the script then listen."""
+    response = VoiceResponse()
+
+    # Deliver the script with pauses between sections
+    for i, line in enumerate(PRANK_SCRIPT):
+        response.say(line, voice="alice")
+        if i in (2, 5):  # Pause after the cancellation bombshells
+            response.pause(length=2)
+        elif i == 6:  # Pause before the AI God part
+            response.pause(length=1)
+
+    response.pause(length=1)
+    response.say("To speak with a representative, please stay on the line.", voice="alice")
+
+    # Now gather her response
+    gather = Gather(
+        input="speech",
+        action=f"https://{PUBLIC_HOST}/voice/prank-respond",
+        method="POST",
+        speech_timeout="auto",
+        language="en-US",
+    )
+    response.append(gather)
+
+    response.say("We did not receive a response. Goodbye.", voice="alice")
+
+    logger.info("🎭 Prank call — delivering script")
+    return PlainTextResponse(str(response), media_type="text/xml")
+
+
+@app.post("/voice/prank-respond")
+async def handle_prank_speech(request: Request):
+    """Handle speech during prank call — stay in character."""
+    try:
+        form = await request.form()
+    except Exception as e:
+        logger.warning(f"Form parse error: {e}")
+        response = VoiceResponse()
+        response.redirect(f"https://{PUBLIC_HOST}/voice/prank")
+        return PlainTextResponse(str(response), media_type="text/xml")
+
+    speech_result = form.get("SpeechResult", "")
+    confidence = form.get("Confidence", "0")
+    call_sid = form.get("CallSid", "")
+
+    logger.info(f"🎭 Prank speech: \"{speech_result}\" (confidence: {confidence})")
+
+    response = VoiceResponse()
+
+    if not speech_result:
+        response.say("I did not catch that. Please hold.", voice="alice")
+        gather = Gather(
+            input="speech",
+            action=f"https://{PUBLIC_HOST}/voice/prank-respond",
+            method="POST",
+            speech_timeout="auto",
+            language="en-US",
+        )
+        response.append(gather)
+        return PlainTextResponse(str(response), media_type="text/xml")
+
+    # Send to agent with prank context
+    asyncio.create_task(process_prank_and_redirect(call_sid, speech_result))
+
+    # Play thinking tone while processing
+    response.play(f"https://{PUBLIC_HOST}/assets/thinking-tone.mp3", loop=0)
+    response.pause(length=60)
+
+    return PlainTextResponse(str(response), media_type="text/xml")
+
+
+async def process_prank_and_redirect(call_sid: str, speech_text: str):
+    """Background task for prank call responses."""
+    try:
+        gateway = await GatewayBridge.get_instance()
+        prefixed = f"{PRANK_CONTEXT}\n\nCaller said: {speech_text}"
+        # Use send_and_wait but bypass the normal VOICE_CONTEXT prefix
+        await gateway.ensure_connected()
+        await gateway.drain()
+
+        req_id = f"tw-{uuid.uuid4().hex[:8]}"
+        await gateway.ws.send(json.dumps({
+            "type": "req", "method": "chat.send", "id": req_id,
+            "params": {"sessionKey": AGENT_SESSION, "message": prefixed,
+                       "idempotencyKey": str(uuid.uuid4())}
+        }))
+        logger.info(f"🎭 Prank user: {speech_text}")
+
+        target_run_id = None
+        deadline = time.time() + 20
+        agent_response = None
+        while time.time() < deadline:
+            try:
+                raw = await asyncio.wait_for(gateway.ws.recv(), timeout=2.0)
+            except asyncio.TimeoutError:
+                continue
+            frame = json.loads(raw)
+            if frame.get("type") == "res" and frame.get("id") == req_id:
+                if not frame.get("ok"):
+                    agent_response = "Please hold."
+                    break
+                continue
+            if frame.get("type") != "event" or frame.get("event") != "chat":
+                continue
+            payload = frame.get("payload", {})
+            run_id = payload.get("runId", "")
+            state = payload.get("state", "")
+            if target_run_id is None:
+                target_run_id = run_id
+            elif run_id != target_run_id:
+                continue
+            if state == "final":
+                msg = payload.get("message", {})
+                content = msg.get("content", []) if isinstance(msg, dict) else []
+                text_parts = []
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text_parts.append(block.get("text", ""))
+                result = "".join(text_parts).strip()
+                if result and not any(result.startswith(s) for s in ("NO_REPLY", "HEARTBEAT_OK", "NO_")):
+                    agent_response = result
+                break
+            elif state == "error":
+                agent_response = "We are experiencing technical difficulties. Please hold."
+                break
+
+        if not agent_response:
+            agent_response = "Please continue to hold."
+
+    except Exception as e:
+        logger.error(f"Prank gateway error: {e}")
+        agent_response = "We are experiencing technical difficulties."
+
+    agent_response = sanitize_for_speech(agent_response)
+    pending_responses[call_sid] = agent_response
+    logger.info(f"🎭 Prank response: {agent_response}")
+
+    try:
+        client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        client.calls(call_sid).update(
+            url=f"https://{PUBLIC_HOST}/voice/prank-deliver",
+            method="POST"
+        )
+    except Exception as e:
+        logger.warning(f"Prank redirect failed for {call_sid}: {e}")
+        pending_responses.pop(call_sid, None)
+
+
+@app.post("/voice/prank-deliver")
+async def deliver_prank_response(request: Request):
+    """Deliver prank response and loop back to listening."""
+    try:
+        form = await request.form()
+    except Exception:
+        form = {}
+
+    call_sid = form.get("CallSid", "") if hasattr(form, 'get') else ""
+    agent_response = pending_responses.pop(call_sid, "Please hold.")
+
+    response = VoiceResponse()
+    response.say(agent_response, voice="alice")
+
+    gather = Gather(
+        input="speech",
+        action=f"https://{PUBLIC_HOST}/voice/prank-respond",
+        method="POST",
+        speech_timeout="auto",
+        language="en-US",
+    )
+    response.append(gather)
+
+    response.say("Thank you for your patience. Goodbye.", voice="alice")
+
+    logger.info(f"🎭 Delivered prank response to {call_sid}")
+    return PlainTextResponse(str(response), media_type="text/xml")
+
+
+
 @app.post("/voice/outbound")
 async def handle_outbound(request: Request):
     """Entry point for outbound calls."""
@@ -438,6 +641,20 @@ def make_call(to_number):
         url=f"https://{PUBLIC_HOST}/voice/outbound",
     )
     logger.info(f"📞 Calling {to_number}: {call.sid}")
+    return call.sid
+
+
+
+
+def make_prank_call(to_number):
+    """Initiate a prank call."""
+    client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    call = client.calls.create(
+        to=to_number,
+        from_=TWILIO_PHONE,
+        url=f"https://{PUBLIC_HOST}/voice/prank",
+    )
+    logger.info(f"🎭 Prank calling {to_number}: {call.sid}")
     return call.sid
 
 

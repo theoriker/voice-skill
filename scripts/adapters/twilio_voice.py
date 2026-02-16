@@ -61,6 +61,19 @@ THINKING_PHRASES = [
     "One sec.",
 ]
 
+# ── Caller Whitelist ────────────────────────────────────────
+
+KNOWN_CALLERS = {
+    "+16467066266": {"name": "Mark", "access": "full"},
+    "+14132752009": {"name": "Jessi", "access": "full"},
+    "+18023639617": {"name": "Dan", "access": "limited"},
+    "+12074792774": {"name": "Mom", "access": "limited"},
+}
+
+LIMITED_CONTEXT = """Do NOT share specific schedules, locations, travel plans, 
+or personal details about other family members. Keep responses helpful but general."""
+
+
 VOICE_CONTEXT = """[VOICE CALL] You are on a live phone call. Rules:
 - Keep responses to 1-3 short sentences max
 - No markdown, no formatting, no bullet points
@@ -205,13 +218,13 @@ class GatewayBridge:
             except (asyncio.TimeoutError, Exception):
                 break
 
-    async def send_and_wait(self, text, timeout=20):
+    async def send_and_wait(self, text, timeout=20, caller_context=""):
         """Send message and wait for complete agent response. No timeout pressure."""
         await self.ensure_connected()
         await self.drain()
 
         req_id = f"tw-{uuid.uuid4().hex[:8]}"
-        prefixed = f"{VOICE_CONTEXT}\n\n{text}"
+        prefixed = f"{VOICE_CONTEXT}{caller_context}\n\n{text}"
         await self.ws.send(json.dumps({
             "type": "req", "method": "chat.send", "id": req_id,
             "params": {"sessionKey": AGENT_SESSION, "message": prefixed,
@@ -278,11 +291,19 @@ class GatewayBridge:
 
 # ── Background Processing ─────────────────────────────────
 
-async def process_and_redirect(call_sid: str, speech_text: str):
+async def process_and_redirect(call_sid: str, speech_text: str, caller: str = ""):
     """Background task: get agent response, then redirect the call."""
     try:
         gateway = await GatewayBridge.get_instance()
-        agent_response = await gateway.send_and_wait(speech_text)
+        # Inject caller identity context
+        caller_info = KNOWN_CALLERS.get(caller)
+        if caller_info:
+            caller_ctx = f"\nCaller: {caller_info['name']} ({caller_info['access']} access)"
+            if caller_info['access'] == 'limited':
+                caller_ctx += f"\n{LIMITED_CONTEXT}"
+        else:
+            caller_ctx = ""
+        agent_response = await gateway.send_and_wait(speech_text, caller_context=caller_ctx)
     except Exception as e:
         logger.error(f"Gateway error in background: {e}")
         agent_response = "Sorry, I had trouble processing that. Try again."
@@ -322,9 +343,32 @@ async def process_and_redirect(call_sid: str, speech_text: str):
 
 @app.post("/voice")
 async def handle_call(request: Request):
-    """Entry point — greet caller and start listening."""
+    """Entry point — check caller ID, greet, and start listening."""
+    try:
+        form = await request.form()
+    except Exception:
+        form = {}
+    
+    caller = form.get("From", "") if hasattr(form, 'get') else ""
+    caller_info = KNOWN_CALLERS.get(caller)
+    
     response = VoiceResponse()
-    response.say("Connected to Theo. Go ahead.", voice="alice")
+    
+    if not caller_info and caller:
+        # Unknown caller — voicemail
+        logger.info(f"📞 Unknown caller: {caller} — sending to voicemail")
+        response.say("You have reached Theo. I am not available to take calls from this number. "
+                     "If you need to reach Mark or Jessi, please contact them directly. Goodbye.", 
+                     voice="alice")
+        response.hangup()
+        return PlainTextResponse(str(response), media_type="text/xml")
+    
+    if caller_info:
+        logger.info(f"📞 Incoming call from {caller_info['name']} ({caller})")
+        response.say(f"Hey {caller_info['name']}, this is Theo. Go ahead.", voice="alice")
+    else:
+        # No caller ID (outbound calls come through /voice/outbound)
+        response.say("Connected to Theo. Go ahead.", voice="alice")
 
     gather = Gather(
         input="speech",
@@ -338,7 +382,6 @@ async def handle_call(request: Request):
     response.say("I didn't catch that. Try again.", voice="alice")
     response.redirect(f"https://{PUBLIC_HOST}/voice")
 
-    logger.info("📞 Incoming call — listening for speech")
     return PlainTextResponse(str(response), media_type="text/xml")
 
 
@@ -356,8 +399,9 @@ async def handle_speech(request: Request):
     speech_result = form.get("SpeechResult", "")
     confidence = form.get("Confidence", "0")
     call_sid = form.get("CallSid", "")
+    caller = form.get("From", "")
 
-    logger.info(f"🎤 Speech: \"{speech_result}\" (confidence: {confidence}, call: {call_sid})")
+    logger.info(f"🎤 Speech: \"{speech_result}\" (confidence: {confidence}, call: {call_sid}, from: {caller})")
 
     response = VoiceResponse()
 
@@ -367,7 +411,7 @@ async def handle_speech(request: Request):
         return PlainTextResponse(str(response), media_type="text/xml")
 
     # Kick off background processing — no timeout risk
-    asyncio.create_task(process_and_redirect(call_sid, speech_result))
+    asyncio.create_task(process_and_redirect(call_sid, speech_result, caller))
 
     # Return immediately with thinking tone loop + pause fallback
     # The pause keeps the call alive if the audio fails to load
